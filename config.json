@@ -48,5 +48,6 @@
   "action_dim": 1152,
   "cache_capacity": 10000,
   "visualize_data": true,
-  "visualization_dir": "data_visualizations"
+  "visualization_dir": "data_visualizations",
+  "action_weight": false  
 }
