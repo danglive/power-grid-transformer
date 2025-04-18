@@ -137,6 +137,9 @@ class QTransformerDataset(BaseDataset):
         else:
             self.indices = indices
         
+        # Determine if action_weight should be used from config
+        self.use_action_weight = config.get('action_weight', False)
+        
         # Configure vector caching
         cache_capacity = config.get('cache_capacity', 100000)
         self.action_cache = VectorCache(cache_capacity)
@@ -171,15 +174,12 @@ class QTransformerDataset(BaseDataset):
             
             # Check action vector structure
             if sample_action.ndim == 2 and sample_action.shape[1] == 2:
-                # Format: [n_actions, 2] where each row is [key, vector]
                 action_vector = sample_action[0, 1]
                 if hasattr(action_vector, 'shape'):
                     self.action_dim = action_vector.shape[0]
                 else:
-                    # Try to determine from the vector itself
                     self.action_dim = len(action_vector)
             elif isinstance(sample_action[0], tuple) or hasattr(sample_action[0], 'dtype'):
-                # Structured array or tuple format
                 if isinstance(sample_action[0], tuple):
                     _, action_vector = sample_action[0]
                 else:
@@ -187,7 +187,6 @@ class QTransformerDataset(BaseDataset):
                 
                 self.action_dim = action_vector.shape[0] if hasattr(action_vector, 'shape') else len(action_vector)
             else:
-                # Default
                 self.action_dim = self.config.get('action_dim', 1152)
                 logger.warning(f"Could not determine action dimension, using config value: {self.action_dim}")
         else:
@@ -204,13 +203,12 @@ class QTransformerDataset(BaseDataset):
         # Sample indices for prefetching (to avoid memory overload)
         max_prefetch = min(1000, len(self.indices))
         
-        # Sửa: Sử dụng các chỉ số trực tiếp từ self.indices thay vì tạo các chỉ số mới
+        # Sử dụng các chỉ số trực tiếp từ self.indices thay vì tạo các chỉ số mới
         sample_indices = np.random.choice(len(self.indices), max_prefetch, replace=False)
         prefetch_indices = [self.indices[i] for i in sample_indices]
         
         # Process each sample
         for idx in prefetch_indices:
-            # Sửa: Gọi _process_* trực tiếp thay vì thông qua __getitem__
             self._process_observation(idx)
             self._process_action_vectors(idx)
             self._process_rho_values(idx)
@@ -234,7 +232,6 @@ class QTransformerDataset(BaseDataset):
         Returns:
             Dictionary containing the sample data
         """
-        # Get the actual index in the data
         actual_idx = self.indices[idx]
         
         # Process observation
@@ -249,6 +246,12 @@ class QTransformerDataset(BaseDataset):
         # Process soft labels
         soft_labels = self._process_soft_labels(actual_idx)
         
+        # Calculate action weights if enabled in config
+        if self.use_action_weight:
+            action_weights = self.compute_action_weight(rho_values)
+        else:
+            action_weights = torch.ones_like(rho_values)  # No weighting if not enabled
+        
         # Get timestep if available
         timestep = None
         if 'timestep' in self.data:
@@ -260,6 +263,7 @@ class QTransformerDataset(BaseDataset):
             'action_vectors': action_vectors,
             'rho_values': rho_values,
             'soft_labels': soft_labels,
+            'action_weights': action_weights,  # Add action_weights
             'timestep': timestep,
             'idx': actual_idx
         }
@@ -269,6 +273,21 @@ class QTransformerDataset(BaseDataset):
             sample['best_action'] = self.data['best_action'][actual_idx]
         
         return sample
+
+    def compute_action_weight(self, rho_values: torch.Tensor, threshold=0.99) -> torch.Tensor:
+        """
+        Compute action weights based on rho_max values.
+        
+        Args:
+            rho_values: Tensor containing the rho_max values for actions.
+            threshold: Threshold to determine which actions are effective (low rho_max).
+        
+        Returns:
+            Tensor of action weights.
+        """
+        action_weights = torch.where(rho_values < threshold, 5.0, 1.0)  # Higher weight for low rho_max
+        return action_weights
+
     
     def _process_observation(self, idx: int) -> torch.Tensor:
         """
@@ -500,9 +519,14 @@ class QTransformerDataModule(BaseDataModule):
         self.val_size = config.get('val_size', 0.2)
         self.split_strategy = config.get('split_strategy', 'random')
         self.random_seed = config.get('random_seed', 42)
+        self.action_weight = config.get("action_weight", None)
     
     def setup(self):
         """Set up the data module, loading and processing datasets."""
+        
+        # Log info for use action weights
+        logger.info(f"Using action weights: {self.action_weight}")
+            
         # Load training data
         train_data = self._load_training_files()
         
